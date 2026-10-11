@@ -280,3 +280,120 @@ model:
             assert vision_tools.check_video_requirements() is False  # no aux client resolves
             assert vision_tools.check_vision_requirements() is True
             assert bt_install.check_browser_vision_requirements() is True
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: video_analyze resolves through auxiliary.video, not auxiliary.vision
+# ---------------------------------------------------------------------------
+
+
+class TestVideoTaskRouting:
+    """``video_analyze`` must be its own auxiliary task (issue #132701).
+
+    Before the fix ``_aux_call_kwargs`` hardcoded ``"task": "vision"`` and read
+    ``auxiliary.vision``, so a video request went to the vision provider no
+    matter what ``auxiliary.video`` said.
+    """
+
+    def test_video_task_is_passed_through(self, isolated_home):
+        _write_config(isolated_home, """
+auxiliary:
+  vision:
+    timeout: 120
+    temperature: 0.2
+  video:
+    timeout: 300
+    temperature: 0.3
+""")
+        _fresh_modules()
+
+        from tools.vision_tools import _aux_call_kwargs
+        kwargs = _aux_call_kwargs([], None, 30.0, task="video")
+        assert kwargs["task"] == "video"
+        assert kwargs["timeout"] == 300.0
+        assert kwargs["temperature"] == 0.3
+
+    def test_video_inherits_keys_it_does_not_set(self, isolated_home):
+        """A partially configured auxiliary.video keeps vision's other keys."""
+        _write_config(isolated_home, """
+auxiliary:
+  vision:
+    timeout: 120
+    temperature: 0.4
+  video:
+    timeout: 240
+""")
+        _fresh_modules()
+
+        from tools.vision_tools import _aux_call_kwargs
+        kwargs = _aux_call_kwargs([], None, 30.0, task="video")
+        assert kwargs["timeout"] == 240.0
+        assert kwargs["temperature"] == 0.4
+
+    def test_no_video_block_keeps_todays_behaviour(self, isolated_home):
+        """A vision-only config still routes video through the vision provider.
+
+        The timeout is video's own registered default (180), which is what the
+        video path asks for anyway; routing is what this test cares about.
+        """
+        _write_config(isolated_home, """
+auxiliary:
+  vision:
+    timeout: 120
+    temperature: 0.5
+""")
+        _fresh_modules()
+
+        from tools.vision_tools import _aux_call_kwargs
+        kwargs = _aux_call_kwargs([], None, 30.0, task="video")
+        assert kwargs["task"] == "video"
+        assert kwargs["temperature"] == 0.5
+        assert kwargs["timeout"] == 180.0
+
+    def test_vision_default_task_is_unchanged(self, isolated_home):
+        _write_config(isolated_home, """
+auxiliary:
+  vision:
+    timeout: 90
+""")
+        _fresh_modules()
+
+        from tools.vision_tools import _aux_call_kwargs
+        kwargs = _aux_call_kwargs([], None, 30.0)
+        assert kwargs["task"] == "vision"
+        assert kwargs["timeout"] == 90.0
+
+    def test_video_provider_resolves_from_its_own_block(self, isolated_home, monkeypatch):
+        _write_config(isolated_home, """
+auxiliary:
+  vision:
+    provider: openai
+    model: gpt-4o-mini
+  video:
+    provider: openai
+    model: gpt-4o
+""")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _fresh_modules()
+
+        from agent.auxiliary_client import _resolve_task_provider_model
+        provider, model, base_url, _key, _mode = _resolve_task_provider_model("video")
+        assert provider == "custom"
+        assert model == "gpt-4o"
+        assert base_url == "https://api.openai.com/v1"
+
+    def test_unset_video_provider_inherits_vision(self, isolated_home, monkeypatch):
+        """An empty auxiliary.video block must not break video routing."""
+        _write_config(isolated_home, """
+auxiliary:
+  vision:
+    provider: openai
+    model: gpt-4o-mini
+""")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _fresh_modules()
+
+        from agent.auxiliary_client import _resolve_task_provider_model
+        provider, model, _base, _key, _mode = _resolve_task_provider_model("video")
+        assert provider == "custom"
+        assert model == "gpt-4o-mini"
